@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Accept crypto payments with the Plaxswap API: developer quickstart</title>
+<meta name="description" content="A short developer quickstart for the Plaxswap payment API: create a payment, send the customer to hosted checkout, verify the signed webhook and test it in test mode.">
+<link rel="canonical" href="https://plaxswap-com.github.io/">
+<style>
+:root{--bg:#ffffff;--fg:#16181d;--muted:#5b6170;--line:#e3e6ec;--code:#f5f6f8;--link:#1f5fd6}
+@media (prefers-color-scheme:dark){:root{--bg:#101217;--fg:#e8eaee;--muted:#a3a9b6;--line:#272b34;--code:#191c23;--link:#7fa8ff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:40px 16px 64px}
+h1{font-size:1.9rem;line-height:1.25;margin:0 0 12px}
+h2{font-size:1.25rem;margin:36px 0 8px;padding-top:12px;border-top:1px solid var(--line)}
+p,li{color:var(--fg)}
+.lead{color:var(--muted);font-size:1.05rem}
+a{color:var(--link)}
+code{background:var(--code);padding:1px 5px;border-radius:4px;font-size:.92em}
+pre{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:14px;overflow-x:auto;font-size:.88rem;line-height:1.5}
+pre code{background:none;padding:0}
+footer{margin-top:48px;color:var(--muted);font-size:.9rem;border-top:1px solid var(--line);padding-top:16px}
+</style>
+</head>
+<body>
+<main>
+<h1>Accept crypto payments with the Plaxswap API</h1>
+<p class="lead">A short quickstart for developers who want to take Bitcoin, USDT and other coins on a website. It covers the four steps you need: create a payment, send the customer to the hosted checkout, verify the signed webhook, and try every outcome in test mode.</p>
+
+<p>The API is JSON over HTTPS. Coin amounts are decimal strings such as <code>"99.5"</code>, never floats, and times are ISO 8601 in UTC. A coin on one network has an id such as <code>usdt-tron</code>, <code>usdc-base</code> or <code>btc</code>. The full reference, with every field and status, is on the <a href="https://plaxswap.com/developers/payments">Plaxswap payment API docs</a>, and the machine-readable spec is at <code>https://plaxswap.com/api/v1/openapi.json</code>.</p>
+
+<h2>1. Get test keys</h2>
+<p>Open a merchant account on the <a href="https://plaxswap.com/merchants">Plaxswap merchants page</a>, finish the business profile and turn on your authenticator. In the merchant dashboard, open Developers. Make a test key (it starts with <code>pxs_test_</code>), save your webhook URL and make a signing secret (<code>whsec_</code>). Each key and secret is shown once. Keep them on your server only, never in a web page or an app.</p>
+
+<h2>2. Create a payment</h2>
+<p>Your server asks for a payment with the price and your order number. Add an <code>Idempotency-Key</code> header so a retried request returns the same payment instead of a second one.</p>
+<pre><code>curl -s -X POST https://plaxswap.com/api/v1/payments \
+  -H "Authorization: Bearer pxs_test_YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: shop.example-order-1042" \
+  -d '{
+    "amount": "100",
+    "currency": "USD",
+    "receive": "usdt-tron",
+    "orderId": "1042",
+    "returnUrl": "https://shop.example/orders/1042/thanks",
+    "cancelUrl": "https://shop.example/cart"
+  }'</code></pre>
+<p>The answer is the payment object, with an <code>id</code> like <code>pay_...</code>, a <code>status</code> of <code>pending</code> and a <code>checkoutUrl</code>. Store the payment id next to your order.</p>
+
+<h2>3. Send the customer to hosted checkout</h2>
+<p>Redirect the customer to <code>checkoutUrl</code>. On the checkout page they pick a coin, see exactly how much to send and where, and send it. When they are done they come back to your <code>returnUrl</code>. Do not trust that return on its own: read the payment from your server with <code>GET /api/v1/payments/:id</code>, or wait for the webhook, before you show the order as paid.</p>
+
+<h2>4. Verify the signed webhook</h2>
+<p>When a payment changes, Plaxswap sends a POST with the whole payment in <code>data</code>. The <code>x-px-signature</code> header looks like <code>t=&lt;unix seconds&gt;,v1=&lt;hex&gt;</code>, where the hex is an HMAC-SHA256 of <code>t + "." + raw body</code>, keyed with your full webhook secret. Check it against the raw body, refuse timestamps older than five minutes, and answer with any 2xx within eight seconds.</p>
+<pre><code>import crypto from "node:crypto";
+
+function verify(rawBody, header, secret) {
+  let t = null; const v1 = [];
+  for (const part of String(header || "").split(",")) {
+    const [k, v] = part.trim().split("=", 2);
+    if (k === "t") t = v;
+    if (k === "v1") v1.push(v);
+  }
+  if (!t || !v1.length || Math.abs(Date.now() / 1000 - Number(t)) &gt; 300) return false;
+  const expected = crypto.createHmac("sha256", secret)
+    .update(t + ".").update(rawBody).digest("hex");
+  return v1.some(sig =&gt; sig.length === expected.length &amp;&amp;
+    crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected)));
+}</code></pre>
+<p>The same event can arrive twice, so remember event ids you have handled. Before you ship, fetch the payment again from the API and check that its status is <code>paid</code>, that the amount, currency and order match, and that <code>livemode</code> matches the key you use.</p>
+
+<h2>5. Test every outcome</h2>
+<p>Payments made with a test key never move real coins. The checkout shows a test banner and buttons that act out each result. You can also do it from your server:</p>
+<pre><code>curl -s -X POST https://plaxswap.com/api/v1/payments/pay_ID/simulate \
+  -H "Authorization: Bearer pxs_test_YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "outcome": "paid" }'</code></pre>
+<p>Outcomes are <code>paid</code>, <code>partially_paid</code>, <code>overpaid</code>, <code>late</code>, <code>expired</code> and <code>failed</code>. Each one sends the same webhook a live payment would, with <code>"livemode": false</code>. One test payment takes one outcome, so make a new payment for the next case.</p>
+
+<h2>Going live</h2>
+<ul>
+<li>Run a test payment through paid, partly paid and expired, and check your handler does the right thing each time.</li>
+<li>Check the signature on every webhook and read the payment back before shipping.</li>
+<li>Swap the test key for a live key (<code>pxs_live_</code>) on your server.</li>
+</ul>
+<p>Confirmed payments go to your Plaxswap merchant balance, and you withdraw to your own wallet from there. The platform fee is 1.5% of a payment; the withdrawal fee and network fees are listed on the <a href="https://plaxswap.com/fees">Plaxswap fees page</a>. Plaxswap is not available in every country.</p>
+
+<h2>Example code</h2>
+<p>Working examples in several languages are in the <a href="https://github.com/plaxswap-com/crypto-payment-gateway-integration">crypto-payment-gateway-integration repository</a> on GitHub. Plugins for WooCommerce, WHMCS and XenForo are also available if you would rather not write the integration yourself.</p>
+
+<footer>Maintained by the Plaxswap team. Questions: support@plaxswap.com. Source for this page: <a href="https://github.com/plaxswap-com/plaxswap-com.github.io">plaxswap-com/plaxswap-com.github.io</a>.</footer>
+</main>
+</body>
+</html>
